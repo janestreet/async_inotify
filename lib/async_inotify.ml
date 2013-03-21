@@ -1,0 +1,210 @@
+open Core.Std
+module Filename = Core_extended.Std.Filename
+(* we want to be very specific about which Unix methods we use in this module *)
+module Base_unix = Unix
+open Async.Std
+module Async_unix = Unix
+module Stats = Async_unix.Stats
+module Unix = struct end
+module Prims = Inotify
+module Find = Async_find
+module Fopts = Find.Options
+
+module Event = struct
+  type move =
+    | Away of string
+    | Into of string
+    | Move of string * string
+
+  type t =
+    | Created of string
+    | Unlinked of string
+    | Modified of string
+    | Moved of move
+
+  let move_to_string m =
+    match m with
+    | Away s -> sprintf "%s -> Unknown" s
+    | Into s -> sprintf "Unknown -> %s" s
+    | Move (f, t) -> sprintf "%s -> %s" f t
+  ;;
+
+  let to_string t =
+    match t with
+    | Created s -> sprintf "created %s" s
+    | Unlinked s -> sprintf "unlinked %s" s
+    | Moved mv -> sprintf "moved %s" (move_to_string mv)
+    | Modified s -> sprintf "modified %s" s
+  ;;
+end
+open Event
+
+type t = {
+  fd: Base_unix.File_descr.t;
+  wd_table: (Prims.wd, string) Hashtbl.t;
+  path_table: (string, Prims.wd) Hashtbl.t;
+  tail: Event.t Tail.t
+}
+type file_info = string * Async_unix.Stats.t
+
+
+let (^/) = Filename.concat
+
+let select_events =
+  Prims.([S_Create; S_Delete; S_Modify; S_Move_self; S_Moved_from; S_Moved_to])
+;;
+
+(** [add t path] add the path to t to be watched *)
+let add t path =
+  In_thread.run (fun () ->
+      let wd = Prims.add_watch t.fd path select_events in
+      Hashtbl.replace t.wd_table ~key:wd ~data:path;
+      Hashtbl.replace t.path_table ~key:path ~data:wd;
+    )
+;;
+
+(* adds all the directories under path (including path) to t *)
+let add_all ?skip_dir t path =
+  let options = {Fopts.default with
+      Fopts.on_open_errors = Fopts.Print;
+      on_stat_errors = Fopts.Print;
+      skip_dir
+    }
+  in
+  add t path >>= fun () ->
+  let f = Find.create ~options path in
+  Find.fold f ~init:[] ~f:(fun files (fn,stat) ->
+    if stat.Stats.kind = `Directory then add t fn >>| (fun () -> (fn,stat) :: files)
+    else return ((fn,stat) :: files))
+;;
+
+(** [remove t path] remove the path from t *)
+let remove t path =
+  In_thread.run (fun () ->
+      Option.iter (Hashtbl.find t.path_table path) ~f:(fun wd ->
+          Prims.rm_watch t.fd wd;
+          Hashtbl.remove t.wd_table wd;
+          Hashtbl.remove t.path_table path;
+        )
+    )
+;;
+
+let build_raw_stream fd wd_table =
+  let tail = Tail.create () in
+  don't_wait_for (In_thread.run (fun () ->
+      while true do
+        let _ :Base_unix.Select_fds.t =
+          Base_unix.select ~read:[fd] ~write:[] ~except:[] ~timeout:`Never ()
+        in
+        let events = Prims.read fd in
+        Thread_safe.run_in_async_exn (fun () ->
+            let events = List.filter_map events ~f:(fun (wd, events, trans_id, fn) ->
+                match Hashtbl.find wd_table wd with
+                | None ->
+                    Print.eprintf "Events for an unknown wd (%d) [%s]"
+                      (Prims.int_of_wd wd)
+                      (String.concat ~sep:", "
+                        (List.map events ~f:Prims.string_of_event));
+                    None
+                | Some path ->
+                    let fn = match fn with None -> path | Some fn -> path ^/  fn in
+                    Some (List.map events ~f:(fun ev -> (ev, trans_id, fn)))
+              ) |! List.concat
+            in
+            let pending_mv,actions =
+              List.fold events ~init:(None,[])
+                ~f:(fun (pending_mv,actions) (ev, trans_id, fn) ->
+                  let add_pending lst =
+                    match pending_mv with
+                    | None -> lst
+                    | Some (_,fn) -> Moved (Away fn) :: lst
+                  in
+                  match ev with
+                  | Prims.Moved_from -> (Some (trans_id, fn), add_pending actions)
+                  | Prims.Moved_to ->
+                      begin
+                        match pending_mv with
+                        | None ->
+                            (None, (Moved (Into fn)) :: actions)
+                        | Some (m_trans_id,m_fn) ->
+                            if m_trans_id = trans_id then
+                              (None,
+                                (Moved (Move (m_fn, fn))) :: actions)
+                            else
+                              (None,
+                                (Moved (Away m_fn)) ::
+                                (Moved (Into fn)) :: actions)
+                      end
+                  | Prims.Move_self ->
+                      (Some (trans_id, fn)), add_pending actions
+                  | Prims.Create ->
+                      None, (Created fn) :: add_pending actions
+                  | Prims.Delete ->
+                      None, (Unlinked fn) :: add_pending actions
+                  | Prims.Modify ->
+                      None, (Modified fn) :: add_pending actions
+                  | Prims.Delete_self -> None, add_pending actions
+                  | Prims.Access | Prims.Attrib | Prims.Close_write
+                  | Prims.Open   | Prims.Ignored
+                  | Prims.Isdir  | Prims.Q_overflow | Prims.Unmount
+                  | Prims.Close_nowrite -> (None, add_pending actions)
+                )
+            in
+            let actions = List.rev
+              (match pending_mv with
+              | None -> actions
+              | Some (_,fn) -> Moved (Away fn) :: actions)
+            in
+            List.iter actions ~f:(Tail.extend tail)
+          )
+      done
+    ));
+  tail
+;;
+
+let create ?(recursive=true) ?(watch_new_dirs=true) path =
+  let path = Filename.expand path in
+  In_thread.run Prims.init >>= fun fd ->
+  let wd_table = Hashtbl.Poly.create () ~size:10 in
+  let t = {
+      fd = fd;
+      wd_table = wd_table;
+      path_table = Hashtbl.Poly.create () ~size:10;
+      tail = Tail.create ()
+    }
+  in
+  let skip_dir = if recursive then
+    None
+  else
+    Some (fun _ -> return true)
+  in
+  add_all ?skip_dir t path >>| fun initial_files ->
+  let raw_tail = build_raw_stream fd wd_table in
+  don't_wait_for (Stream.iter' (Tail.collect raw_tail) ~f:(fun ev ->
+      if not watch_new_dirs then return (Tail.extend t.tail ev)
+      else
+        match ev with
+        | Unlinked _ | Moved _ | Modified _ -> return (Tail.extend t.tail ev);
+        | Created path ->
+            (*Async_unix.stat path >>= fun stat ->*)
+            Monitor.try_with (fun () -> Async_unix.stat path) >>= function
+              | Error _ -> (* created file has already disappeared *) return ()
+              | Ok stat ->
+                  match stat.Async_unix.Stats.kind with
+                    | `File | `Char | `Block | `Link | `Fifo | `Socket ->
+                        return (Tail.extend t.tail (Created path));
+                    | `Directory ->
+                        Tail.extend t.tail (Created path);
+                        add_all t path >>| fun _ -> ()
+    ));
+  (t, initial_files)
+;;
+
+let stop t =
+  In_thread.run (fun () -> Base_unix.close t.fd)
+;;
+
+(** [stream t] returns a stream of filesystem events *)
+let stream t = Tail.collect t.tail
+
+let pipe t = Pipe.of_stream_deprecated (stream t)
