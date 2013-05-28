@@ -30,3 +30,11 @@ Library async_inotify
                       async_find,
                       core_extended,
                       threads
+
+Document "async_inotify"
+  Title:                Async wrapper for inotify
+  Type:                 ocamlbuild (0.3)
+  BuildTools+:          ocamldoc
+  XOCamlbuildPath:      lib
+  XOCamlbuildLibraries: async_inotify
+
