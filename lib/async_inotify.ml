@@ -1,5 +1,4 @@
 open Core.Std
-module Filename = Core_extended.Std.Filename
 (* we want to be very specific about which Unix methods we use in this module *)
 module Base_unix = Unix
 open Async.Std
@@ -163,7 +162,11 @@ let build_raw_stream fd wd_table =
 ;;
 
 let create ?(recursive=true) ?(watch_new_dirs=true) path =
-  let path = Filename.expand path in
+  (* This function used to call: [Core_extended.Filename.expand path]
+     But this is the wrong place for such an expansion.
+     The caller should do this if required.
+     By removing this call, we avoid the dependency of this library on core_extended.
+  *)
   In_thread.run Prims.init >>= fun fd ->
   let wd_table = Hashtbl.Poly.create () ~size:10 in
   let t = {
