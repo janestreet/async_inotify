@@ -1,5 +1,5 @@
 (* OASIS_START *)
-(* DO NOT EDIT (digest: f5423f146251aa61cf62145e330bc006) *)
+(* DO NOT EDIT (digest: 099167014f696e8be380b05f2fd7d1de) *)
 This is the INSTALL file for the async_inotify distribution.
 
 This package uses OASIS to generate its build system. See section OASIS for
@@ -26,7 +26,7 @@ Installing
 Uninstalling
 ============
 
-1. Go to the root of the package 
+1. Go to the root of the package
 2. Run 'ocaml setup.ml -uninstall'
 
 OASIS

@@ -1,7 +1,7 @@
 # OASIS_START
-# DO NOT EDIT (digest: 34987b63c54ee205593f095ecbc9c6d9)
-# Ignore VCS directories, you can use the same kind of rule outside 
-# OASIS_START/STOP if you want to exclude directories that contains 
+# DO NOT EDIT (digest: bb6d2ed05c52bc5679cc4d9b2c2b10f4)
+# Ignore VCS directories, you can use the same kind of rule outside
+# OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
 <**/.svn>: -traverse
 <**/.svn>: not_hygienic
@@ -15,10 +15,10 @@
 "_darcs": not_hygienic
 # Library async_inotify
 "lib/async_inotify.cmxs": use_async_inotify
-<lib/*.ml{,i}>: pkg_inotify
-<lib/*.ml{,i}>: pkg_async
-<lib/*.ml{,i}>: pkg_async_find
-<lib/*.ml{,i}>: pkg_threads
-<lib/*.ml{,i}>: pkg_camlp4
+<lib/*.ml{,i}>: package(inotify)
+<lib/*.ml{,i}>: package(async)
+<lib/*.ml{,i}>: package(async_find)
+<lib/*.ml{,i}>: package(threads)
+<lib/*.ml{,i}>: package(camlp4)
 # OASIS_STOP
 <lib/*.ml{,i}>: syntax_camlp4o
