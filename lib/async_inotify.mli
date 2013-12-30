@@ -15,10 +15,14 @@ module Event : sig
     | Unlinked of string
     | Modified of string
     | Moved of move
-    
+    (* Queue overflow means that you are not consuming events fast enough and just
+       lost some of them. This means that some changes to files you want might go
+       unnoticed *)
+    | Queue_overflow
+
   val to_string : t -> string
 end
-  
+
 (** [create path] create an inotify watching path. Returns the inotify type t itself
   and the list of files currently being watched. By default, recursively watches all
   subdirectories of the given path. *)

@@ -20,6 +20,7 @@ module Event = struct
     | Unlinked of string
     | Modified of string
     | Moved of move
+    | Queue_overflow
 
   let move_to_string m =
     match m with
@@ -34,6 +35,7 @@ module Event = struct
     | Unlinked s -> sprintf "unlinked %s" s
     | Moved mv -> sprintf "moved %s" (move_to_string mv)
     | Modified s -> sprintf "modified %s" s
+    | Queue_overflow -> "queue overflow"
   ;;
 end
 open Event
@@ -98,6 +100,16 @@ let build_raw_stream fd wd_table =
         let events = Prims.read fd in
         Thread_safe.run_in_async_exn (fun () ->
             let events = List.filter_map events ~f:(fun (wd, events, trans_id, fn) ->
+              if Prims.int_of_wd wd = -1 (* queue overflow event is always reported on wd -1 *) then
+                let maybe_overflow =
+                  List.filter_map events ~f:(fun ev ->
+                    match ev with
+                    | Prims.Q_overflow -> Some (ev, trans_id, "<overflow>")
+                    | _ -> None
+                  )
+                in
+                if maybe_overflow = [] then None else Some maybe_overflow
+              else
                 match Hashtbl.find wd_table wd with
                 | None ->
                     Print.eprintf "Events for an unknown wd (%d) [%s]"
@@ -142,10 +154,12 @@ let build_raw_stream fd wd_table =
                       None, (Unlinked fn) :: add_pending actions
                   | Prims.Modify ->
                       None, (Modified fn) :: add_pending actions
+                  | Prims.Q_overflow ->
+                      None, Queue_overflow :: add_pending actions
                   | Prims.Delete_self -> None, add_pending actions
                   | Prims.Access | Prims.Attrib | Prims.Close_write
                   | Prims.Open   | Prims.Ignored
-                  | Prims.Isdir  | Prims.Q_overflow | Prims.Unmount
+                  | Prims.Isdir  | Prims.Unmount
                   | Prims.Close_nowrite -> (None, add_pending actions)
                 )
             in
@@ -187,6 +201,7 @@ let create ?(recursive=true) ?(watch_new_dirs=true) path =
       if not watch_new_dirs then return (Tail.extend t.tail ev)
       else
         match ev with
+        | Queue_overflow
         | Unlinked _ | Moved _ | Modified _ -> return (Tail.extend t.tail ev);
         | Created path ->
             (*Async_unix.stat path >>= fun stat ->*)
