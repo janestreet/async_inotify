@@ -1,15 +1,15 @@
 (* OASIS_START *)
-(* DO NOT EDIT (digest: e52708216686db8a8d435d37d72f5b9f) *)
+(* DO NOT EDIT (digest: 44709ad4880b28cf3cff346818fc87ff) *)
 This is the INSTALL file for the async_inotify distribution.
 
 This package uses OASIS to generate its build system. See section OASIS for
-full information.
+full information. 
 
 Dependencies
 ============
 
 In order to compile this package, you will need:
-* ocaml (>= 4.00.0) for all, doc async_inotify
+* ocaml (>= 4.00.0)
 * findlib (>= 1.3.2)
 * inotify
 * async

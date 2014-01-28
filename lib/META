@@ -1,6 +1,6 @@
 # OASIS_START
-# DO NOT EDIT (digest: a940688f8f97854dc06d46a7bda04410)
-version = "109.58.00"
+# DO NOT EDIT (digest: 8166dd82c21c56cb9efab8ed16b8f4e0)
+version = "109.58.01"
 description = "Async wrapper for inotify"
 requires = "inotify async async_find threads"
 archive(byte) = "async_inotify.cma"
