@@ -19,7 +19,7 @@ Library async_inotify
   Path:               lib
   FindlibName:        async_inotify
   Modules:            Async_inotify
-  BuildDepends:       inotify,
+  BuildDepends:       inotify (>= 2.0),
                       async,
                       async_find,
                       threads,
