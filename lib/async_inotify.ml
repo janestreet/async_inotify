@@ -42,8 +42,8 @@ open Event
 
 type t = {
   fd: Base_unix.File_descr.t;
-  wd_table: (Prims.wd, string) Hashtbl.t;
-  path_table: (string, Prims.wd) Hashtbl.t;
+  watch_table: (Prims.watch, string) Hashtbl.t;
+  path_table: (string, Prims.watch) Hashtbl.t;
   tail: Event.t Tail.t
 }
 type file_info = string * Async_unix.Stats.t
@@ -58,9 +58,9 @@ let select_events =
 (** [add t path] add the path to t to be watched *)
 let add t path =
   In_thread.run (fun () ->
-      let wd = Prims.add_watch t.fd path select_events in
-      Hashtbl.replace t.wd_table ~key:wd ~data:path;
-      Hashtbl.replace t.path_table ~key:path ~data:wd;
+      let watch = Prims.add_watch t.fd path select_events in
+      Hashtbl.replace t.watch_table ~key:watch ~data:path;
+      Hashtbl.replace t.path_table ~key:path ~data:watch;
     )
 ;;
 
@@ -82,15 +82,15 @@ let add_all ?skip_dir t path =
 (** [remove t path] remove the path from t *)
 let remove t path =
   In_thread.run (fun () ->
-      Option.iter (Hashtbl.find t.path_table path) ~f:(fun wd ->
-          Prims.rm_watch t.fd wd;
-          Hashtbl.remove t.wd_table wd;
+      Option.iter (Hashtbl.find t.path_table path) ~f:(fun watch ->
+          Prims.rm_watch t.fd watch;
+          Hashtbl.remove t.watch_table watch;
           Hashtbl.remove t.path_table path;
         )
     )
 ;;
 
-let build_raw_stream fd wd_table =
+let build_raw_stream fd watch_table =
   let tail = Tail.create () in
   don't_wait_for (In_thread.run (fun () ->
       while true do
@@ -99,10 +99,10 @@ let build_raw_stream fd wd_table =
         in
         let events = Prims.read fd in
         Thread_safe.run_in_async_exn (fun () ->
-            let events = List.filter_map events ~f:(fun (wd, events, trans_id, fn) ->
-              if Prims.int_of_wd wd = -1 (* queue overflow event is always reported on wd -1 *) then
+            let ev_kinds = List.filter_map events ~f:(fun (watch, ev_kinds, trans_id, fn) ->
+              if Prims.int_of_watch watch = -1 (* queue overflow event is always reported on watch -1 *) then
                 let maybe_overflow =
-                  List.filter_map events ~f:(fun ev ->
+                  List.filter_map ev_kinds ~f:(fun ev ->
                     match ev with
                     | Prims.Q_overflow -> Some (ev, trans_id, "<overflow>")
                     | _ -> None
@@ -110,27 +110,27 @@ let build_raw_stream fd wd_table =
                 in
                 if maybe_overflow = [] then None else Some maybe_overflow
               else
-                match Hashtbl.find wd_table wd with
+                match Hashtbl.find watch_table watch with
                 | None ->
-                    Print.eprintf "Events for an unknown wd (%d) [%s]"
-                      (Prims.int_of_wd wd)
+                    Print.eprintf "Events for an unknown watch (%d) [%s]"
+                      (Prims.int_of_watch watch)
                       (String.concat ~sep:", "
-                        (List.map events ~f:Prims.string_of_event));
+                        (List.map ev_kinds ~f:Prims.string_of_event_kind));
                     None
                 | Some path ->
                     let fn = match fn with None -> path | Some fn -> path ^/  fn in
-                    Some (List.map events ~f:(fun ev -> (ev, trans_id, fn)))
+                    Some (List.map ev_kinds ~f:(fun ev -> (ev, trans_id, fn)))
               ) |! List.concat
             in
             let pending_mv,actions =
-              List.fold events ~init:(None,[])
-                ~f:(fun (pending_mv,actions) (ev, trans_id, fn) ->
+              List.fold ev_kinds ~init:(None,[])
+                ~f:(fun (pending_mv,actions) (kind, trans_id, fn) ->
                   let add_pending lst =
                     match pending_mv with
                     | None -> lst
                     | Some (_,fn) -> Moved (Away fn) :: lst
                   in
-                  match ev with
+                  match kind with
                   | Prims.Moved_from -> (Some (trans_id, fn), add_pending actions)
                   | Prims.Moved_to ->
                       begin
@@ -181,11 +181,11 @@ let create ?(recursive=true) ?(watch_new_dirs=true) path =
      The caller should do this if required.
      By removing this call, we avoid the dependency of this library on core_extended.
   *)
-  In_thread.run Prims.init >>= fun fd ->
-  let wd_table = Hashtbl.Poly.create () ~size:10 in
+  In_thread.run Prims.create >>= fun fd ->
+  let watch_table = Hashtbl.Poly.create () ~size:10 in
   let t = {
       fd = fd;
-      wd_table = wd_table;
+      watch_table = watch_table;
       path_table = Hashtbl.Poly.create () ~size:10;
       tail = Tail.create ()
     }
@@ -196,7 +196,7 @@ let create ?(recursive=true) ?(watch_new_dirs=true) path =
     Some (fun _ -> return true)
   in
   add_all ?skip_dir t path >>| fun initial_files ->
-  let raw_tail = build_raw_stream fd wd_table in
+  let raw_tail = build_raw_stream fd watch_table in
   don't_wait_for (Stream.iter' (Tail.collect raw_tail) ~f:(fun ev ->
       if not watch_new_dirs then return (Tail.extend t.tail ev)
       else
