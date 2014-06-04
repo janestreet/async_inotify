@@ -5,7 +5,6 @@ open Async.Std
 module Async_unix = Unix
 module Stats = Async_unix.Stats
 module Unix = struct end
-module Prims = Inotify
 module Find = Async_find
 module Fopts = Find.Options
 
@@ -42,8 +41,8 @@ open Event
 
 type t = {
   fd: Base_unix.File_descr.t;
-  wd_table: (Prims.wd, string) Hashtbl.t;
-  path_table: (string, Prims.wd) Hashtbl.t;
+  watch_table: (Inotify.watch, string) Hashtbl.t;
+  path_table: Inotify.watch String.Table.t;
   tail: Event.t Tail.t
 }
 type file_info = string * Async_unix.Stats.t
@@ -52,15 +51,15 @@ type file_info = string * Async_unix.Stats.t
 let (^/) = Filename.concat
 
 let select_events =
-  Prims.([S_Create; S_Delete; S_Modify; S_Move_self; S_Moved_from; S_Moved_to])
+  Inotify.([S_Create; S_Delete; S_Modify; S_Move_self; S_Moved_from; S_Moved_to])
 ;;
 
 (** [add t path] add the path to t to be watched *)
 let add t path =
   In_thread.run (fun () ->
-      let wd = Prims.add_watch t.fd path select_events in
-      Hashtbl.replace t.wd_table ~key:wd ~data:path;
-      Hashtbl.replace t.path_table ~key:path ~data:wd;
+      let watch = Inotify.add_watch t.fd path select_events in
+      Hashtbl.replace t.watch_table ~key:watch ~data:path;
+      Hashtbl.replace t.path_table ~key:path ~data:watch;
     )
 ;;
 
@@ -82,57 +81,57 @@ let add_all ?skip_dir t path =
 (** [remove t path] remove the path from t *)
 let remove t path =
   In_thread.run (fun () ->
-      Option.iter (Hashtbl.find t.path_table path) ~f:(fun wd ->
-          Prims.rm_watch t.fd wd;
-          Hashtbl.remove t.wd_table wd;
+      Option.iter (Hashtbl.find t.path_table path) ~f:(fun watch ->
+          Inotify.rm_watch t.fd watch;
+          Hashtbl.remove t.watch_table watch;
           Hashtbl.remove t.path_table path;
-        )
     )
+  )
 ;;
 
-let build_raw_stream fd wd_table =
+let build_raw_stream fd watch_table =
   let tail = Tail.create () in
   don't_wait_for (In_thread.run (fun () ->
       while true do
         let _ :Base_unix.Select_fds.t =
           Base_unix.select ~read:[fd] ~write:[] ~except:[] ~timeout:`Never ()
         in
-        let events = Prims.read fd in
+        let events = Inotify.read fd in
         Thread_safe.run_in_async_exn (fun () ->
-            let events = List.filter_map events ~f:(fun (wd, events, trans_id, fn) ->
-              if Prims.int_of_wd wd = -1 (* queue overflow event is always reported on wd -1 *) then
+            let ev_kinds = List.filter_map events ~f:(fun (watch, ev_kinds, trans_id, fn) ->
+              if Inotify.int_of_watch watch = -1 (* queue overflow event is always reported on watch -1 *) then
                 let maybe_overflow =
-                  List.filter_map events ~f:(fun ev ->
+                  List.filter_map ev_kinds ~f:(fun ev ->
                     match ev with
-                    | Prims.Q_overflow -> Some (ev, trans_id, "<overflow>")
+                    | Inotify.Q_overflow -> Some (ev, trans_id, "<overflow>")
                     | _ -> None
                   )
                 in
                 if maybe_overflow = [] then None else Some maybe_overflow
               else
-                match Hashtbl.find wd_table wd with
+                match Hashtbl.find watch_table watch with
                 | None ->
-                    Print.eprintf "Events for an unknown wd (%d) [%s]"
-                      (Prims.int_of_wd wd)
+                    Print.eprintf "Events for an unknown watch (%d) [%s]"
+                      (Inotify.int_of_watch watch)
                       (String.concat ~sep:", "
-                        (List.map events ~f:Prims.string_of_event));
+                        (List.map ev_kinds ~f:Inotify.string_of_event_kind));
                     None
                 | Some path ->
                     let fn = match fn with None -> path | Some fn -> path ^/  fn in
-                    Some (List.map events ~f:(fun ev -> (ev, trans_id, fn)))
+                    Some (List.map ev_kinds ~f:(fun ev -> (ev, trans_id, fn)))
               ) |! List.concat
             in
             let pending_mv,actions =
-              List.fold events ~init:(None,[])
-                ~f:(fun (pending_mv,actions) (ev, trans_id, fn) ->
+              List.fold ev_kinds ~init:(None,[])
+                ~f:(fun (pending_mv,actions) (kind, trans_id, fn) ->
                   let add_pending lst =
                     match pending_mv with
                     | None -> lst
                     | Some (_,fn) -> Moved (Away fn) :: lst
                   in
-                  match ev with
-                  | Prims.Moved_from -> (Some (trans_id, fn), add_pending actions)
-                  | Prims.Moved_to ->
+                  match kind with
+                  | Inotify.Moved_from -> (Some (trans_id, fn), add_pending actions)
+                  | Inotify.Moved_to ->
                       begin
                         match pending_mv with
                         | None ->
@@ -146,21 +145,21 @@ let build_raw_stream fd wd_table =
                                 (Moved (Away m_fn)) ::
                                 (Moved (Into fn)) :: actions)
                       end
-                  | Prims.Move_self ->
+                  | Inotify.Move_self ->
                       (Some (trans_id, fn)), add_pending actions
-                  | Prims.Create ->
+                  | Inotify.Create ->
                       None, (Created fn) :: add_pending actions
-                  | Prims.Delete ->
+                  | Inotify.Delete ->
                       None, (Unlinked fn) :: add_pending actions
-                  | Prims.Modify ->
+                  | Inotify.Modify ->
                       None, (Modified fn) :: add_pending actions
-                  | Prims.Q_overflow ->
+                  | Inotify.Q_overflow ->
                       None, Queue_overflow :: add_pending actions
-                  | Prims.Delete_self -> None, add_pending actions
-                  | Prims.Access | Prims.Attrib | Prims.Close_write
-                  | Prims.Open   | Prims.Ignored
-                  | Prims.Isdir  | Prims.Unmount
-                  | Prims.Close_nowrite -> (None, add_pending actions)
+                  | Inotify.Delete_self -> None, add_pending actions
+                  | Inotify.Access | Inotify.Attrib | Inotify.Close_write
+                  | Inotify.Open   | Inotify.Ignored
+                  | Inotify.Isdir  | Inotify.Unmount
+                  | Inotify.Close_nowrite -> (None, add_pending actions)
                 )
             in
             let actions = List.rev
@@ -181,11 +180,11 @@ let create ?(recursive=true) ?(watch_new_dirs=true) path =
      The caller should do this if required.
      By removing this call, we avoid the dependency of this library on core_extended.
   *)
-  In_thread.run Prims.init >>= fun fd ->
-  let wd_table = Hashtbl.Poly.create () ~size:10 in
+  In_thread.run Inotify.create >>= fun fd ->
+  let watch_table = Hashtbl.Poly.create () ~size:10 in
   let t = {
       fd = fd;
-      wd_table = wd_table;
+      watch_table = watch_table;
       path_table = Hashtbl.Poly.create () ~size:10;
       tail = Tail.create ()
     }
@@ -196,7 +195,7 @@ let create ?(recursive=true) ?(watch_new_dirs=true) path =
     Some (fun _ -> return true)
   in
   add_all ?skip_dir t path >>| fun initial_files ->
-  let raw_tail = build_raw_stream fd wd_table in
+  let raw_tail = build_raw_stream fd watch_table in
   don't_wait_for (Stream.iter' (Tail.collect raw_tail) ~f:(fun ev ->
       if not watch_new_dirs then return (Tail.extend t.tail ev)
       else
