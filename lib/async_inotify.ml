@@ -58,8 +58,8 @@ let select_events =
 let add t path =
   In_thread.run (fun () ->
       let watch = Inotify.add_watch t.fd path select_events in
-      Hashtbl.replace t.watch_table ~key:watch ~data:path;
-      Hashtbl.replace t.path_table ~key:path ~data:watch;
+      Hashtbl.set t.watch_table ~key:watch ~data:path;
+      Hashtbl.set t.path_table ~key:path ~data:watch;
     )
 ;;
 
