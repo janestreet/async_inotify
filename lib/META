@@ -1,0 +1,12 @@
+# OASIS_START
+# DO NOT EDIT (digest: e5d14b01c49c5ace80ef81159369f0a0)
+version = "111.28.00"
+description = "Async wrapper for inotify"
+requires = "inotify async async_find threads"
+archive(byte) = "async_inotify.cma"
+archive(byte, plugin) = "async_inotify.cma"
+archive(native) = "async_inotify.cmxa"
+archive(native, plugin) = "async_inotify.cmxs"
+exists_if = "async_inotify.cma"
+# OASIS_STOP
+
