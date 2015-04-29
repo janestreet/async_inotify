@@ -16,7 +16,7 @@ XStdFilesREADME:  false
 BuildTools:       ocamlbuild, camlp4o
 
 Library async_inotify
-  Path:               lib
+  Path:               src
   FindlibName:        async_inotify
   Modules:            Async_inotify
   BuildDepends:       inotify,
