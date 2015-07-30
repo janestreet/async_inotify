@@ -43,21 +43,18 @@ type t = {
   fd: Base_unix.File_descr.t;
   watch_table: (Inotify.watch, string) Hashtbl.t;
   path_table: Inotify.watch String.Table.t;
-  tail: Event.t Tail.t
+  tail: Event.t Tail.t;
+  select_events : Inotify.selector list;
 }
 type file_info = string * Async_unix.Stats.t
 
 
 let (^/) = Filename.concat
 
-let select_events =
-  Inotify.([S_Create; S_Delete; S_Modify; S_Move_self; S_Moved_from; S_Moved_to])
-;;
-
 (** [add t path] add the path to t to be watched *)
 let add t path =
   In_thread.run (fun () ->
-      let watch = Inotify.add_watch t.fd path select_events in
+      let watch = Inotify.add_watch t.fd path t.select_events in
       Hashtbl.set t.watch_table ~key:watch ~data:path;
       Hashtbl.set t.path_table ~key:path ~data:watch;
     )
@@ -93,7 +90,7 @@ let build_raw_stream fd watch_table =
   let tail = Tail.create () in
   don't_wait_for (In_thread.run (fun () ->
       while true do
-        let _ :Base_unix.Select_fds.t =
+        let (_ :Base_unix.Select_fds.t) =
           Base_unix.select ~read:[fd] ~write:[] ~except:[] ~timeout:`Never ()
         in
         let events = Inotify.read fd in
@@ -151,12 +148,12 @@ let build_raw_stream fd watch_table =
                       None, (Created fn) :: add_pending actions
                   | Inotify.Delete ->
                       None, (Unlinked fn) :: add_pending actions
-                  | Inotify.Modify ->
+                  | Inotify.Modify | Inotify.Close_write ->
                       None, (Modified fn) :: add_pending actions
                   | Inotify.Q_overflow ->
                       None, Queue_overflow :: add_pending actions
                   | Inotify.Delete_self -> None, add_pending actions
-                  | Inotify.Access | Inotify.Attrib | Inotify.Close_write
+                  | Inotify.Access | Inotify.Attrib
                   | Inotify.Open   | Inotify.Ignored
                   | Inotify.Isdir  | Inotify.Unmount
                   | Inotify.Close_nowrite -> (None, add_pending actions)
@@ -174,7 +171,7 @@ let build_raw_stream fd watch_table =
   tail
 ;;
 
-let create ?(recursive=true) ?(watch_new_dirs=true) path =
+let create ?(modify_event_selector = `Any_change) ?(recursive=true) ?(watch_new_dirs=true) path =
   (* This function used to call: [Core_extended.Filename.expand path]
      But this is the wrong place for such an expansion.
      The caller should do this if required.
@@ -182,11 +179,24 @@ let create ?(recursive=true) ?(watch_new_dirs=true) path =
   *)
   In_thread.run Inotify.create >>= fun fd ->
   let watch_table = Hashtbl.Poly.create () ~size:10 in
+  let modify_selector : Inotify.selector =
+    match modify_event_selector with
+    | `Any_change -> S_Modify
+    | `Closed_writable_fd -> S_Close_write
+  in
   let t = {
       fd = fd;
       watch_table = watch_table;
       path_table = Hashtbl.Poly.create () ~size:10;
-      tail = Tail.create ()
+      tail = Tail.create ();
+      select_events = [
+        S_Create;
+        S_Delete;
+        modify_selector;
+        S_Move_self;
+        S_Moved_from;
+        S_Moved_to;
+      ];
     }
   in
   let skip_dir = if recursive then

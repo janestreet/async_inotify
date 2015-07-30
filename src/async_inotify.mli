@@ -26,7 +26,19 @@ end
 (** [create path] create an inotify watching path. Returns the inotify type t itself
   and the list of files currently being watched. By default, recursively watches all
   subdirectories of the given path. *)
-val create : ?recursive:bool -> ?watch_new_dirs:bool -> string -> (t * file_info list) Deferred.t
+val create
+  :  ?modify_event_selector:
+    [ `Any_change (** Send a Modified event whenever the contents of the file changes
+                      (which can be very often when writing a large file) *)
+    | `Closed_writable_fd (** Only send a Modify event when someone with a file descriptor
+                              with write permission to that file is closed. There are
+                              usually many fewer of these events (for large files),
+                              but they come later. *)
+    ]
+  -> ?recursive:bool
+  -> ?watch_new_dirs:bool
+  -> string
+  -> (t * file_info list) Deferred.t
 
 (** [stop t] stop watching t *)
 val stop : t -> unit Deferred.t
