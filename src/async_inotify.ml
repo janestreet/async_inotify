@@ -5,6 +5,7 @@ open Async.Std
 module Async_unix = Unix
 module Stats = Async_unix.Stats
 module Unix = struct end
+module Inotify = Ocaml_inotify.Inotify
 module Find = Async_find
 module Fopts = Find.Options
 

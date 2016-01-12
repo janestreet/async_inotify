@@ -1,0 +1,7 @@
+version = "$(pkg_version)"
+description = "Async wrapper for inotify"
+requires = "async async_find bin_prot core fieldslib inotify ppx_assert.runtime-lib ppx_bench.runtime-lib ppx_expect.collector ppx_inline_test.runtime-lib sexplib typerep variantslib"
+archive(byte          ) = "async_inotify.cma"
+archive(native        ) = "async_inotify.cmxa"
+archive(native, plugin) = "async_inotify.cmxs"
+exists_if = "async_inotify.cma"
