@@ -117,7 +117,7 @@ let build_raw_stream fd watch_table =
                 | Some path ->
                     let fn = match fn with None -> path | Some fn -> path ^/  fn in
                     Some (List.map ev_kinds ~f:(fun ev -> (ev, trans_id, fn)))
-              ) |! List.concat
+              ) |> List.concat
             in
             let pending_mv,actions =
               List.fold ev_kinds ~init:(None,[])
