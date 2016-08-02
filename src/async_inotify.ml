@@ -92,7 +92,8 @@ let build_raw_stream fd watch_table =
   don't_wait_for (In_thread.run (fun () ->
       while true do
         let (_ :Base_unix.Select_fds.t) =
-          Base_unix.select ~read:[fd] ~write:[] ~except:[] ~timeout:`Never ()
+          Base_unix.select
+            ~restart:true ~read:[fd] ~write:[] ~except:[] ~timeout:`Never ()
         in
         let events = Inotify.read fd in
         Thread_safe.run_in_async_exn (fun () ->
