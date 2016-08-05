@@ -1,0 +1,7 @@
+(library
+ ((name async_inotify) (wrapped false)
+  (public_name async_inotify)
+  (libraries (async
+                    async_find
+                    core
+                    ocaml_inotify))))
