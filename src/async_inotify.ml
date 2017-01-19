@@ -179,7 +179,10 @@ let create ?(modify_event_selector = `Any_change) ?(recursive=true) ?(watch_new_
      The caller should do this if required.
      By removing this call, we avoid the dependency of this library on core_extended.
   *)
-  In_thread.run Inotify.create >>= fun fd ->
+  In_thread.run Inotify.create
+  >>= fun fd ->
+  In_thread.run (fun () -> Base_unix.set_close_on_exec fd)
+  >>= fun () ->
   let watch_table = Hashtbl.Poly.create () ~size:10 in
   let modify_selector : Inotify.selector =
     match modify_event_selector with
