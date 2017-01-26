@@ -1,4 +1,4 @@
-open Core.Std
+open Core
 (* we want to be very specific about which Unix methods we use in this module *)
 module Base_unix = Unix
 open Async.Std
