@@ -1,7 +1,7 @@
 open Core
 (* we want to be very specific about which Unix methods we use in this module *)
 module Base_unix = Unix
-open Async.Std
+open Async
 module Async_unix = Unix
 module Stats = Async_unix.Stats
 module Unix = struct end

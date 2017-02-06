@@ -1,5 +1,5 @@
 open! Core
-open! Async.Std
+open! Async
 
 type t
 type file_info = string * Unix.Stats.t
