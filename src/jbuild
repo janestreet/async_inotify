@@ -5,3 +5,5 @@
               async_find
               core
               inotify))))
+
+(jbuild_version jane_street)
