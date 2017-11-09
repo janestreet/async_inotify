@@ -14,6 +14,7 @@ module Event = struct
     | Away of string
     | Into of string
     | Move of string * string
+  [@@deriving sexp_of]
 
   type t =
     | Created of string
@@ -21,6 +22,7 @@ module Event = struct
     | Modified of string
     | Moved of move
     | Queue_overflow
+  [@@deriving sexp_of]
 
   let move_to_string m =
     match m with
@@ -49,6 +51,7 @@ type t = {
 }
 type file_info = string * Async_unix.Stats.t
 
+type modify_event_selector = [ `Any_change | `Closed_writable_fd ]
 
 let (^/) = Filename.concat
 
@@ -116,7 +119,7 @@ let build_raw_stream fd watch_table =
                         (List.map ev_kinds ~f:Inotify.string_of_event_kind));
                     None
                 | Some path ->
-                    let fn = match fn with None -> path | Some fn -> path ^/  fn in
+                    let fn = match fn with None -> path | Some fn -> path ^/ fn in
                     Some (List.map ev_kinds ~f:(fun ev -> (ev, trans_id, fn)))
               ) |> List.concat
             in
@@ -173,62 +176,70 @@ let build_raw_stream fd watch_table =
   tail
 ;;
 
-let create ?(modify_event_selector = `Any_change) ?(recursive=true) ?(watch_new_dirs=true) path =
-  (* This function used to call: [Core_extended.Filename.expand path]
-     But this is the wrong place for such an expansion.
-     The caller should do this if required.
-     By removing this call, we avoid the dependency of this library on core_extended.
-  *)
+let build_tail ~watch_new_dirs t =
+  let raw_tail = build_raw_stream t.fd t.watch_table in
+  don't_wait_for (Stream.iter' (Tail.collect raw_tail) ~f:(fun ev ->
+    if not watch_new_dirs then return (Tail.extend t.tail ev)
+    else
+      match ev with
+      | Queue_overflow
+      | Unlinked _ | Moved _ | Modified _ -> return (Tail.extend t.tail ev);
+      | Created path ->
+        Monitor.try_with (fun () -> Async_unix.stat path) >>= function
+        | Error _ -> (* created file has already disappeared *) return ()
+        | Ok stat ->
+          match stat.Async_unix.Stats.kind with
+          | `File | `Char | `Block | `Link | `Fifo | `Socket ->
+            return (Tail.extend t.tail (Created path));
+          | `Directory ->
+            Tail.extend t.tail (Created path);
+            add_all t path >>| fun _ -> ()
+  ))
+;;
+
+let create_with_unbuilt_tail ~modify_event_selector =
   In_thread.run Inotify.create
   >>= fun fd ->
   In_thread.run (fun () -> Base_unix.set_close_on_exec fd)
-  >>= fun () ->
+  >>| fun () ->
   let watch_table = Hashtbl.Poly.create () ~size:10 in
   let modify_selector : Inotify.selector =
     match modify_event_selector with
     | `Any_change -> S_Modify
     | `Closed_writable_fd -> S_Close_write
   in
-  let t = {
-      fd = fd;
-      watch_table = watch_table;
-      path_table = Hashtbl.Poly.create () ~size:10;
-      tail = Tail.create ();
-      select_events = [
-        S_Create;
-        S_Delete;
-        modify_selector;
-        S_Move_self;
-        S_Moved_from;
-        S_Moved_to;
-      ];
-    }
-  in
-  let skip_dir = if recursive then
-    None
-  else
-    Some (fun _ -> return true)
-  in
-  add_all ?skip_dir t path >>| fun initial_files ->
-  let raw_tail = build_raw_stream fd watch_table in
-  don't_wait_for (Stream.iter' (Tail.collect raw_tail) ~f:(fun ev ->
-      if not watch_new_dirs then return (Tail.extend t.tail ev)
-      else
-        match ev with
-        | Queue_overflow
-        | Unlinked _ | Moved _ | Modified _ -> return (Tail.extend t.tail ev);
-        | Created path ->
-            (*Async_unix.stat path >>= fun stat ->*)
-            Monitor.try_with (fun () -> Async_unix.stat path) >>= function
-              | Error _ -> (* created file has already disappeared *) return ()
-              | Ok stat ->
-                  match stat.Async_unix.Stats.kind with
-                    | `File | `Char | `Block | `Link | `Fifo | `Socket ->
-                        return (Tail.extend t.tail (Created path));
-                    | `Directory ->
-                        Tail.extend t.tail (Created path);
-                        add_all t path >>| fun _ -> ()
-    ));
+  {
+    fd;
+    watch_table;
+    path_table = Hashtbl.Poly.create () ~size:10;
+    tail = Tail.create ();
+    select_events = [
+      S_Create;
+      S_Delete;
+      modify_selector;
+      S_Move_self;
+      S_Moved_from;
+      S_Moved_to;
+    ];
+  }
+;;
+
+let create_empty ~modify_event_selector =
+  let%map t = create_with_unbuilt_tail ~modify_event_selector in
+  build_tail ~watch_new_dirs:false t;
+  t
+;;
+
+let create ?(modify_event_selector = `Any_change) ?(recursive=true) ?(watch_new_dirs=true) path =
+  (* This function used to call: [Core_extended.Filename.expand path]
+     But this is the wrong place for such an expansion.
+     The caller should do this if required.
+     By removing this call, we avoid the dependency of this library on core_extended.
+  *)
+  let%bind t = create_with_unbuilt_tail ~modify_event_selector in
+  let skip_dir = if recursive then None else Some (fun _ -> return true) in
+  let%map initial_files = add_all ?skip_dir t path in
+  build_tail ~watch_new_dirs t;
   (t, initial_files)
 ;;
 
