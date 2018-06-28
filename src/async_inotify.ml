@@ -231,7 +231,7 @@ let create_empty ~modify_event_selector =
 ;;
 
 let create ?(modify_event_selector = `Any_change) ?(recursive=true) ?(watch_new_dirs=true) path =
-  (* This function used to call: [Core_extended.Filename.expand path]
+  (* This function used to call: [Filename_extended.expand path]
      But this is the wrong place for such an expansion.
      The caller should do this if required.
      By removing this call, we avoid the dependency of this library on core_extended.
