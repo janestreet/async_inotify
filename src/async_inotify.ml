@@ -1,3 +1,12 @@
+(* We don't make calls to [Inotify] functions ([add_watch], [rm_watch]) in [In_thread.run]
+   because:
+
+   - we don't think they can block for a while
+   - Inotify doesn't release the OCaml lock anyway
+   - it avoids racing with the select loop below, by preventing adding
+   a watch and seeing an event about it before having filled the hashtable
+   (not that we have observed this particular race). *)
+
 open Core
 (* we want to be very specific about which Unix methods we use in this module *)
 module Base_unix = Unix
@@ -55,13 +64,11 @@ type modify_event_selector = [ `Any_change | `Closed_writable_fd ]
 
 let (^/) = Filename.concat
 
-(** [add t path] add the path to t to be watched *)
 let add t path =
-  In_thread.run (fun () ->
-      let watch = Inotify.add_watch t.fd path t.select_events in
-      Hashtbl.set t.watch_table ~key:watch ~data:path;
-      Hashtbl.set t.path_table ~key:path ~data:watch;
-    )
+  let watch = Inotify.add_watch t.fd path t.select_events in
+  Hashtbl.set t.watch_table ~key:watch ~data:path;
+  Hashtbl.set t.path_table ~key:path ~data:watch;
+  return ();
 ;;
 
 (* adds all the directories under path (including path) to t *)
@@ -79,15 +86,14 @@ let add_all ?skip_dir t path =
     else return ((fn,stat) :: files))
 ;;
 
-(** [remove t path] remove the path from t *)
 let remove t path =
-  In_thread.run (fun () ->
-      Option.iter (Hashtbl.find t.path_table path) ~f:(fun watch ->
-          Inotify.rm_watch t.fd watch;
-          Hashtbl.remove t.watch_table watch;
-          Hashtbl.remove t.path_table path;
-    )
-  )
+  match Hashtbl.find t.path_table path with
+  | None -> return ()
+  | Some watch ->
+    Inotify.rm_watch t.fd watch;
+    Hashtbl.remove t.watch_table watch;
+    Hashtbl.remove t.path_table path;
+    return ();
 ;;
 
 let build_raw_stream fd watch_table =
@@ -113,7 +119,7 @@ let build_raw_stream fd watch_table =
               else
                 match Hashtbl.find watch_table watch with
                 | None ->
-                    Print.eprintf "Events for an unknown watch (%d) [%s]"
+                    Print.eprintf "Events for an unknown watch (%d) [%s]\n"
                       (Inotify.int_of_watch watch)
                       (String.concat ~sep:", "
                         (List.map ev_kinds ~f:Inotify.string_of_event_kind));
@@ -198,8 +204,7 @@ let build_tail ~watch_new_dirs t =
 ;;
 
 let create_with_unbuilt_tail ~modify_event_selector =
-  In_thread.run Inotify.create
-  >>= fun fd ->
+  let fd = Inotify.create () in
   In_thread.run (fun () -> Base_unix.set_close_on_exec fd)
   >>| fun () ->
   let watch_table = Hashtbl.Poly.create () ~size:10 in
