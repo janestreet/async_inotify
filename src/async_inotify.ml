@@ -8,6 +8,7 @@
    (not that we have observed this particular race). *)
 
 open Core
+open Poly
 (* we want to be very specific about which Unix methods we use in this module *)
 module Base_unix = Unix
 open Async
