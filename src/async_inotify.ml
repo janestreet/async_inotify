@@ -58,6 +58,7 @@ type t = {
   path_table: Inotify.watch String.Table.t;
   tail: Event.t Tail.t;
   select_events : Inotify.selector list;
+  mutable stopped : bool;
 }
 type file_info = string * Async_unix.Stats.t
 
@@ -97,11 +98,15 @@ let remove t path =
     return ();
 ;;
 
-let build_raw_stream fd watch_table =
+let build_raw_stream t =
   let tail = Tail.create () in
+  let fd = t.fd in
+  let watch_table = t.watch_table in
   don't_wait_for (In_thread.run (fun () ->
-      while true do
+      while not t.stopped do
         let (_ :Base_unix.Select_fds.t) =
+          (* If someone calls [stop], this thread is going to get stuck forever (at least
+             on linux) *)
           Base_unix.select
             ~restart:true ~read:[fd] ~write:[] ~except:[] ~timeout:`Never ()
         in
@@ -184,7 +189,7 @@ let build_raw_stream fd watch_table =
 ;;
 
 let build_tail ~watch_new_dirs t =
-  let raw_tail = build_raw_stream t.fd t.watch_table in
+  let raw_tail = build_raw_stream t in
   don't_wait_for (Stream.iter' (Tail.collect raw_tail) ~f:(fun ev ->
     if not watch_new_dirs then return (Tail.extend t.tail ev)
     else
@@ -227,6 +232,7 @@ let create_with_unbuilt_tail ~modify_event_selector =
       S_Moved_from;
       S_Moved_to;
     ];
+    stopped = false
   }
 ;;
 
@@ -250,10 +256,12 @@ let create ?(modify_event_selector = `Any_change) ?(recursive=true) ?(watch_new_
 ;;
 
 let stop t =
+  t.stopped <- true;
   In_thread.run (fun () -> Base_unix.close t.fd)
 ;;
 
 (** [stream t] returns a stream of filesystem events *)
 let stream t = Tail.collect t.tail
 
-let pipe t = Pipe.of_stream_deprecated (stream t)
+let pipe t =
+  Pipe.of_stream_deprecated (stream t)
