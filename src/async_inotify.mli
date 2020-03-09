@@ -1,3 +1,10 @@
+(** Async-friendly bindings to inotify, see [man 7 inotify].
+
+    Be aware that the interface of inotify makes it easy to write code with race
+    conditions or other subtle pitfalls. For instance, stat'ing a file then watching it
+    means you have lost any events between the stat and the watch. Or the behavior when
+    watching a path whose inode has multiple hardlinks is non-obvious. *)
+
 open! Core
 open! Async
 
@@ -16,7 +23,7 @@ module Event : sig
     | Unlinked of string
     | Modified of string
     | Moved of move
-    (* Queue overflow means that you are not consuming events fast enough and just
+    (** Queue overflow means that you are not consuming events fast enough and just
        lost some of them. This means that some changes to files you want might go
        unnoticed *)
     | Queue_overflow
@@ -34,9 +41,9 @@ type modify_event_selector =
                             but they come later. *)
   ]
 
-(** [create path] creates an inotify watching path. Returns the inotify type t itself
-  and the list of files currently being watched. By default, recursively watches all
-  subdirectories of the given path. *)
+(** [create path] creates an inotify watching path. Returns the inotify type t itself and
+    the list of files currently being watched. By default, recursively watches all
+    subdirectories of the given path. See [add_all] for caveats. *)
 val create
   :  ?modify_event_selector:modify_event_selector
   -> ?recursive:bool
@@ -56,7 +63,9 @@ val stop : t -> unit Deferred.t
 (** [add t path] add the path to t to be watched *)
 val add : t -> string -> unit Deferred.t
 
-(** [add_all t path] adds the path to t recursively  *)
+(** [add_all t path] watches [path] and all its current subdirectories recursively.
+    This may generate events in the event pipe that are older than the returned file
+    info, in the presence of concurrent modification to the filesystem.  *)
 val add_all : ?skip_dir:(string * Unix.Stats.t -> bool Deferred.t) -> t -> string -> file_info list Deferred.t
 
 (** [remove t path] remove the path from t *)
