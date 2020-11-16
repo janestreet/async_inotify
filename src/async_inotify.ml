@@ -197,7 +197,11 @@ let build_tail ~watch_new_dirs t =
       | Queue_overflow
       | Unlinked _ | Moved _ | Modified _ -> return (Tail.extend t.tail ev);
       | Created path ->
-        Monitor.try_with (fun () -> Async_unix.stat path) >>= function
+        Monitor.try_with
+          ~run:(`Schedule)
+          ~rest:(`Log)
+          (fun () -> Async_unix.stat path)
+        >>= function
         | Error _ -> (* created file has already disappeared *) return ()
         | Ok stat ->
           match stat.Async_unix.Stats.kind with
@@ -205,7 +209,9 @@ let build_tail ~watch_new_dirs t =
             return (Tail.extend t.tail (Created path));
           | `Directory ->
             Tail.extend t.tail (Created path);
-            add_all t path >>| fun _ -> ()
+            add_all t path
+            >>| List.iter ~f:(fun (file, _stat) ->
+              Tail.extend t.tail (Created file))
   ))
 ;;
 
