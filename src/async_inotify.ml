@@ -10,7 +10,7 @@
 open Core
 open Poly
 (* we want to be very specific about which Unix methods we use in this module *)
-module Base_unix = Unix
+module Base_unix = Core_unix
 open Async
 module Async_unix = Unix
 module Stats = Async_unix.Stats

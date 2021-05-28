@@ -1,2 +1,3 @@
 (library (name async_inotify) (public_name async_inotify)
- (libraries async async_find core inotify) (preprocess (pps ppx_jane)))
+ (libraries async async_find core core.core_unix inotify)
+ (preprocess (pps ppx_jane)))
