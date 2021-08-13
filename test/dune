@@ -1,0 +1,4 @@
+(library (name async_inotify_test)
+ (libraries async async_inotify core_kernel.core core.core_unix
+  expect_test_helpers_async)
+ (preprocess (pps ppx_jane)))

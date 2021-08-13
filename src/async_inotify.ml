@@ -1,25 +1,43 @@
-(* We don't make calls to [Inotify] functions ([add_watch], [rm_watch]) in [In_thread.run]
-   because:
+(* We don't make calls to [Inotify] functions ([add_watch], [rm_watch], [read]) in
+   [In_thread.run] because:
 
    - we don't think they can block for a while
    - Inotify doesn't release the OCaml lock anyway
-   - it avoids racing with the select loop below, by preventing adding
-   a watch and seeing an event about it before having filled the hashtable
-   (not that we have observed this particular race). *)
+   - it avoids changes to the set of watches racing with the Inotify.read loop below, by
+     preventing adding a watch and seeing an event about it before having filled the
+     hashtable (not that we have observed this particular race). *)
 
 open Core
-open Poly
-(* we want to be very specific about which Unix methods we use in this module *)
-module Base_unix = Core_unix
 open Async
-module Async_unix = Unix
-module Stats = Async_unix.Stats
-module Unix = struct end
 module Inotify = Ocaml_inotify.Inotify
-module Find = Async_find
-module Fopts = Find.Options
+
+type modify_event_selector =
+  [ `Any_change
+  | `Closed_writable_fd
+  ]
 
 module Event = struct
+  module Selector = struct
+    type t =
+      | Created
+      | Unlinked
+      | Modified
+      | Moved
+    [@@deriving enumerate, compare, sexp_of]
+
+    let inotify_selectors ts modify_event_selector =
+      List.dedup_and_sort ts ~compare
+      |> List.concat_map ~f:(function
+        | Created -> [ Inotify.S_Create ]
+        | Unlinked -> [ S_Delete ]
+        | Modified ->
+          (match modify_event_selector with
+           | `Any_change -> [ S_Modify ]
+           | `Closed_writable_fd -> [ S_Close_write ])
+        | Moved -> [ S_Move_self; S_Moved_from; S_Moved_to ])
+    ;;
+  end
+
   type move =
     | Away of string
     | Into of string
@@ -50,224 +68,222 @@ module Event = struct
     | Queue_overflow -> "queue overflow"
   ;;
 end
+
 open Event
 
-type t = {
-  fd: Base_unix.File_descr.t;
-  watch_table: (Inotify.watch, string) Hashtbl.t;
-  path_table: Inotify.watch String.Table.t;
-  tail: Event.t Tail.t;
-  select_events : Inotify.selector list;
-  mutable stopped : bool;
-}
-type file_info = string * Async_unix.Stats.t
+module Watch = struct
+  type t = Inotify.watch
 
-type modify_event_selector = [ `Any_change | `Closed_writable_fd ]
+  let compare t1 t2 = Int.compare (Inotify.int_of_watch t1) (Inotify.int_of_watch t2)
+  let hash t = Int.hash (Inotify.int_of_watch t)
+  let sexp_of_t t = sexp_of_int (Inotify.int_of_watch t)
+end
 
-let (^/) = Filename.concat
+type t =
+  { fd : Fd.t
+  ; watch_table : (Inotify.watch, string) Hashtbl.t
+  ; path_table : Inotify.watch String.Table.t
+  ; modify_event_selector : modify_event_selector
+  ; default_selectors : Inotify.selector list
+  }
 
-let add t path =
-  let watch = Inotify.add_watch t.fd path t.select_events in
+type file_info = string * Unix.Stats.t
+
+let add ?events t path =
+  let watch =
+    Fd.with_file_descr_exn t.fd (fun fd ->
+      Inotify.add_watch
+        fd
+        path
+        (match events with
+         | None -> t.default_selectors
+         | Some e -> Event.Selector.inotify_selectors e t.modify_event_selector))
+  in
   Hashtbl.set t.watch_table ~key:watch ~data:path;
   Hashtbl.set t.path_table ~key:path ~data:watch;
-  return ();
+  return ()
 ;;
 
 (* adds all the directories under path (including path) to t *)
-let add_all ?skip_dir t path =
-  let options = {Fopts.default with
-      Fopts.on_open_errors = Fopts.Print;
-      on_stat_errors = Fopts.Print;
-      skip_dir
+let add_all ?skip_dir ?events t path =
+  let options =
+    { Async_find.Options.default with
+      on_open_errors = Print
+    ; on_stat_errors = Print
+    ; skip_dir
     }
   in
-  add t path >>= fun () ->
-  let f = Find.create ~options path in
-  Find.fold f ~init:[] ~f:(fun files (fn,stat) ->
-    if stat.Stats.kind = `Directory then add t fn >>| (fun () -> (fn,stat) :: files)
-    else return ((fn,stat) :: files))
+  let%bind () = add ?events t path in
+  let f = Async_find.create ~options path in
+  Async_find.fold f ~init:[] ~f:(fun files (fn, stat) ->
+    match stat.kind with
+    | `Directory ->
+      let%map () = add ?events t fn in
+      (fn, stat) :: files
+    | _ -> return ((fn, stat) :: files))
 ;;
 
 let remove t path =
   match Hashtbl.find t.path_table path with
   | None -> return ()
   | Some watch ->
-    Inotify.rm_watch t.fd watch;
+    Fd.with_file_descr_exn t.fd (fun fd -> Inotify.rm_watch fd watch);
     Hashtbl.remove t.watch_table watch;
     Hashtbl.remove t.path_table path;
-    return ();
+    return ()
 ;;
 
-let build_raw_stream t =
-  let tail = Tail.create () in
-  let fd = t.fd in
-  let watch_table = t.watch_table in
-  don't_wait_for (In_thread.run (fun () ->
-      while not t.stopped do
-        let (_ :Base_unix.Select_fds.t) =
-          (* If someone calls [stop], this thread is going to get stuck forever (at least
-             on linux) *)
-          Base_unix.select
-            ~restart:true ~read:[fd] ~write:[] ~except:[] ~timeout:`Never ()
-        in
-        let events = Inotify.read fd in
-        Thread_safe.run_in_async_exn (fun () ->
-            let ev_kinds = List.filter_map events ~f:(fun (watch, ev_kinds, trans_id, fn) ->
-              if Inotify.int_of_watch watch = -1 (* queue overflow event is always reported on watch -1 *) then
-                let maybe_overflow =
-                  List.filter_map ev_kinds ~f:(fun ev ->
-                    match ev with
-                    | Inotify.Q_overflow -> Some (ev, trans_id, "<overflow>")
-                    | _ -> None
-                  )
-                in
-                if maybe_overflow = [] then None else Some maybe_overflow
-              else
-                match Hashtbl.find watch_table watch with
-                | None ->
-                    Print.eprintf "Events for an unknown watch (%d) [%s]\n"
-                      (Inotify.int_of_watch watch)
-                      (String.concat ~sep:", "
+(* with streams, this was effectively infinite, so pick a big number  *)
+let size_budget = 10_000_000
+
+let raw_event_pipe t =
+  Pipe.create_reader ~size_budget ~close_on_exception:false (fun w ->
+    Deferred.repeat_until_finished () (fun () ->
+      match%bind Fd.ready_to t.fd `Read with
+      | `Bad_fd -> failwith "Bad Inotify file descriptor"
+      | `Closed -> return (`Finished ())
+      | `Ready ->
+        (* Read in the async thread. We should reading memory, like what happens with
+           pipes and sockets, and unlike what happens with files, and we should know
+           that there's data. Ensure the fd is nonblock so the read raises instead of
+           blocking async if something has gone wrong. *)
+        (match Fd.with_file_descr ~nonblocking:true t.fd Inotify.read with
+         | `Already_closed -> return (`Finished ())
+         | `Error exn -> raise_s [%sexp "Inotify.read failed", (exn : Exn.t)]
+         | `Ok events ->
+           let ev_kinds =
+             List.filter_map events ~f:(fun (watch, ev_kinds, trans_id, fn) ->
+               (* queue overflow event is always reported on watch -1 *)
+               if Inotify.int_of_watch watch = -1
+               then (
+                 let maybe_overflow =
+                   List.filter_map ev_kinds ~f:(fun ev ->
+                     match ev with
+                     | Q_overflow -> Some (ev, trans_id, "<overflow>")
+                     | _ -> None)
+                 in
+                 if List.is_empty maybe_overflow then None else Some maybe_overflow)
+               else (
+                 match Hashtbl.find t.watch_table watch with
+                 | None ->
+                   Print.eprintf
+                     "Events for an unknown watch (%d) [%s]\n"
+                     (Inotify.int_of_watch watch)
+                     (String.concat
+                        ~sep:", "
                         (List.map ev_kinds ~f:Inotify.string_of_event_kind));
-                    None
-                | Some path ->
-                    let fn = match fn with None -> path | Some fn -> path ^/ fn in
-                    Some (List.map ev_kinds ~f:(fun ev -> (ev, trans_id, fn)))
-              ) |> List.concat
-            in
-            let pending_mv,actions =
-              List.fold ev_kinds ~init:(None,[])
-                ~f:(fun (pending_mv,actions) (kind, trans_id, fn) ->
-                  let add_pending lst =
-                    match pending_mv with
-                    | None -> lst
-                    | Some (_,fn) -> Moved (Away fn) :: lst
-                  in
-                  match kind with
-                  | Inotify.Moved_from -> (Some (trans_id, fn), add_pending actions)
-                  | Inotify.Moved_to ->
-                      begin
-                        match pending_mv with
-                        | None ->
-                            (None, (Moved (Into fn)) :: actions)
-                        | Some (m_trans_id,m_fn) ->
-                            if m_trans_id = trans_id then
-                              (None,
-                                (Moved (Move (m_fn, fn))) :: actions)
-                            else
-                              (None,
-                                (Moved (Away m_fn)) ::
-                                (Moved (Into fn)) :: actions)
-                      end
-                  | Inotify.Move_self ->
-                      (Some (trans_id, fn)), add_pending actions
-                  | Inotify.Create ->
-                      None, (Created fn) :: add_pending actions
-                  | Inotify.Delete ->
-                      None, (Unlinked fn) :: add_pending actions
-                  | Inotify.Modify | Inotify.Close_write ->
-                      None, (Modified fn) :: add_pending actions
-                  | Inotify.Q_overflow ->
-                      None, Queue_overflow :: add_pending actions
-                  | Inotify.Delete_self -> None, add_pending actions
-                  | Inotify.Access | Inotify.Attrib
-                  | Inotify.Open   | Inotify.Ignored
-                  | Inotify.Isdir  | Inotify.Unmount
-                  | Inotify.Close_nowrite -> (None, add_pending actions)
-                )
-            in
-            let actions = List.rev
-              (match pending_mv with
-              | None -> actions
-              | Some (_,fn) -> Moved (Away fn) :: actions)
-            in
-            List.iter actions ~f:(Tail.extend tail)
-          )
-      done
-    ));
-  tail
+                   None
+                 | Some path ->
+                   let fn =
+                     match fn with
+                     | None -> path
+                     | Some fn -> path ^/ fn
+                   in
+                   Some (List.map ev_kinds ~f:(fun ev -> ev, trans_id, fn))))
+             |> List.concat
+           in
+           let pending_mv, actions =
+             List.fold
+               ev_kinds
+               ~init:(None, [])
+               ~f:(fun (pending_mv, actions) (kind, trans_id, fn) ->
+                 let add_pending lst =
+                   match pending_mv with
+                   | None -> lst
+                   | Some (_, fn) -> Moved (Away fn) :: lst
+                 in
+                 match kind with
+                 | Moved_from -> Some (trans_id, fn), add_pending actions
+                 | Moved_to ->
+                   (match pending_mv with
+                    | None -> None, Moved (Into fn) :: actions
+                    | Some (m_trans_id, m_fn) ->
+                      if Int32.( = ) m_trans_id trans_id
+                      then None, Moved (Move (m_fn, fn)) :: actions
+                      else None, Moved (Away m_fn) :: Moved (Into fn) :: actions)
+                 | Move_self -> Some (trans_id, fn), add_pending actions
+                 | Create -> None, Created fn :: add_pending actions
+                 | Delete -> None, Unlinked fn :: add_pending actions
+                 | Modify | Close_write -> None, Modified fn :: add_pending actions
+                 | Q_overflow -> None, Queue_overflow :: add_pending actions
+                 | Delete_self -> None, add_pending actions
+                 | Access | Attrib | Open | Ignored | Isdir | Unmount | Close_nowrite
+                   -> None, add_pending actions)
+           in
+           let actions =
+             List.rev
+               (match pending_mv with
+                | None -> actions
+                | Some (_, fn) -> Moved (Away fn) :: actions)
+           in
+           List.iter actions ~f:(Pipe.write_without_pushback_if_open w);
+           let%map () = Pipe.pushback w in
+           `Repeat ())))
 ;;
 
-let build_tail ~watch_new_dirs t =
-  let raw_tail = build_raw_stream t in
-  don't_wait_for (Stream.iter' (Tail.collect raw_tail) ~f:(fun ev ->
-    if not watch_new_dirs then return (Tail.extend t.tail ev)
-    else
-      match ev with
-      | Queue_overflow
-      | Unlinked _ | Moved _ | Modified _ -> return (Tail.extend t.tail ev);
-      | Created path ->
-        Monitor.try_with
-          ~run:(`Schedule)
-          ~rest:(`Log)
-          (fun () -> Async_unix.stat path)
-        >>= function
-        | Error _ -> (* created file has already disappeared *) return ()
-        | Ok stat ->
-          match stat.Async_unix.Stats.kind with
-          | `File | `Char | `Block | `Link | `Fifo | `Socket ->
-            return (Tail.extend t.tail (Created path));
-          | `Directory ->
-            Tail.extend t.tail (Created path);
-            add_all t path
-            >>| List.iter ~f:(fun (file, _stat) ->
-              Tail.extend t.tail (Created file))
-  ))
+let event_pipe ~watch_new_dirs ?events t =
+  if not watch_new_dirs
+  then raw_event_pipe t
+  else
+    Pipe.create_reader ~size_budget ~close_on_exception:false (fun w ->
+      Pipe.iter (raw_event_pipe t) ~f:(function
+        | (Queue_overflow | Unlinked _ | Moved _ | Modified _) as ev ->
+          Pipe.write_if_open w ev
+        | Created path ->
+          (match%bind Monitor.try_with (fun () -> Unix.stat path) with
+           | Error _ -> (* created file has already disappeared *) return ()
+           | Ok stat ->
+             (match stat.kind with
+              | `File | `Char | `Block | `Link | `Fifo | `Socket ->
+                Pipe.write_if_open w (Created path)
+              | `Directory ->
+                Pipe.write_without_pushback_if_open w (Created path);
+                let%bind additions = add_all ?events t path in
+                List.iter additions ~f:(fun (file, _stat) ->
+                  Pipe.write_without_pushback_if_open w (Created file));
+                Pipe.pushback w))))
 ;;
 
-let create_with_unbuilt_tail ~modify_event_selector =
+let create_internal ~modify_event_selector =
   let fd = Inotify.create () in
-  In_thread.run (fun () -> Base_unix.set_close_on_exec fd)
-  >>| fun () ->
-  let watch_table = Hashtbl.Poly.create () ~size:10 in
-  let modify_selector : Inotify.selector =
-    match modify_event_selector with
-    | `Any_change -> S_Modify
-    | `Closed_writable_fd -> S_Close_write
-  in
-  {
-    fd;
-    watch_table;
-    path_table = Hashtbl.Poly.create () ~size:10;
-    tail = Tail.create ();
-    select_events = [
-      S_Create;
-      S_Delete;
-      modify_selector;
-      S_Move_self;
-      S_Moved_from;
-      S_Moved_to;
-    ];
-    stopped = false
+  let%map () = In_thread.run (fun () -> Core_unix.set_close_on_exec fd) in
+  (* fstat an on inotify fd says the filetype is File, but we tell async Fifo instead.
+     The reason is that async considers that for File, Fd.ready_to is meaningless and so
+     should return immediately. So instead we say Fifo, because an inotify fd is basically
+     the read end of a pipe whose write end is owned by the kernel, and more importantly,
+     Fd.create knows that fifos support nonblocking. *)
+  let fd = Fd.create Fifo fd (Info.of_string "async_inotify") in
+  let watch_table = Hashtbl.create (module Watch) ~size:10 in
+  { fd
+  ; watch_table
+  ; path_table = Hashtbl.create (module String) ~size:10
+  ; modify_event_selector
+  ; default_selectors =
+      Event.Selector.inotify_selectors Event.Selector.all modify_event_selector
   }
 ;;
 
 let create_empty ~modify_event_selector =
-  let%map t = create_with_unbuilt_tail ~modify_event_selector in
-  build_tail ~watch_new_dirs:false t;
-  t
+  let%map t = create_internal ~modify_event_selector in
+  t, event_pipe ~watch_new_dirs:false t
 ;;
 
-let create ?(modify_event_selector = `Any_change) ?(recursive=true) ?(watch_new_dirs=true) path =
-  (* This function used to call: [Filename_extended.expand path]
-     But this is the wrong place for such an expansion.
-     The caller should do this if required.
-     By removing this call, we avoid the dependency of this library on core_extended.
-  *)
-  let%bind t = create_with_unbuilt_tail ~modify_event_selector in
+let create
+      ?(modify_event_selector = `Any_change)
+      ?(recursive = true)
+      ?(watch_new_dirs = true)
+      ?(events = Event.Selector.all)
+      path
+  =
+  let events =
+    if watch_new_dirs
+    then Event.Selector.Created :: Event.Selector.Moved :: events
+    else events
+  in
+  let%bind t = create_internal ~modify_event_selector in
   let skip_dir = if recursive then None else Some (fun _ -> return true) in
-  let%map initial_files = add_all ?skip_dir t path in
-  build_tail ~watch_new_dirs t;
-  (t, initial_files)
+  let%map initial_files = add_all ?skip_dir ~events t path in
+  t, initial_files, event_pipe ~watch_new_dirs ~events t
 ;;
 
-let stop t =
-  t.stopped <- true;
-  In_thread.run (fun () -> Base_unix.close t.fd)
-;;
-
-(** [stream t] returns a stream of filesystem events *)
-let stream t = Tail.collect t.tail
-
-let pipe t =
-  Pipe.of_stream_deprecated (stream t)
+let stop t = Fd.close t.fd
