@@ -14,10 +14,10 @@ depends: [
   "async"
   "async_find"
   "core"
-  "core_kernel"
+  "core_unix"
   "ppx_jane"
-  "dune"        {>= "2.0.0"}
-  "inotify"     {>= "0.2.0"}
+  "dune"       {>= "2.0.0"}
+  "inotify"    {>= "0.2.0"}
 ]
 synopsis: "Async wrapper for inotify"
 description: "
