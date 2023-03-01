@@ -39,7 +39,7 @@ module Event : sig
         lost some of them. This means that some changes to files you want might go
         unnoticed *)
     | Queue_overflow
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   val to_string : t -> string
 end
@@ -70,12 +70,17 @@ type modify_event_selector =
     [watch_new_dirs] is only a property of [create]; subsequent calls to
     [add t]/[add_all t] will not automatically include these, even if [t] was
     created with [watch_new_dirs].
+
+    [wait_to_consolidate_moves] specifies whether to wait a little bit after seeing a
+    [Move (Away _)] event for the corresponding [Move (Into, _)] event, so you are more
+    likely to get a single [Move (Move _)].
 *)
 val create
   :  ?modify_event_selector:modify_event_selector
   -> ?recursive:bool
   -> ?watch_new_dirs:bool
   -> ?events:Event.Selector.t list (** default: [Event.Selector.all] *)
+  -> ?wait_to_consolidate_moves:Time_float.Span.t
   -> string
   -> (t * file_info list * Event.t Pipe.Reader.t) Deferred.t
 
@@ -90,6 +95,8 @@ val create_empty
 (** [stop t] stops watching for notifications. The pipe of events is closed once all
     remaining have been read. Any use of [add]/[remove] from this point will raise. *)
 val stop : t -> unit Deferred.t
+
+val stopped : t -> bool
 
 (** [add t path] add the path to t to be watched *)
 val add

@@ -42,7 +42,7 @@ module Event = struct
     | Away of string
     | Into of string
     | Move of string * string
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   type t =
     | Created of string
@@ -50,7 +50,7 @@ module Event = struct
     | Modified of string
     | Moved of move
     | Queue_overflow
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   let move_to_string m =
     match m with
@@ -85,6 +85,7 @@ type t =
   ; path_table : Inotify.watch String.Table.t
   ; modify_event_selector : modify_event_selector
   ; default_selectors : Inotify.selector list
+  ; wait_to_consolidate_moves : Time_float.Span.t option
   }
 
 type file_info = string * Unix.Stats.t
@@ -138,31 +139,66 @@ let size_budget = 10_000_000
 
 let raw_event_pipe t =
   Pipe.create_reader ~size_budget ~close_on_exception:false (fun w ->
-    Deferred.repeat_until_finished () (fun () ->
-      match%bind Fd.ready_to t.fd `Read with
+    let report_pending_move = function
+      | None -> ()
+      | Some (_, fn) -> Pipe.write_without_pushback_if_open w (Moved (Away fn))
+    in
+    Deferred.repeat_until_finished None (fun pending_mv ->
+      let ready_to_read = Fd.ready_to t.fd `Read
+      and ready_to_write = Pipe.pushback w in
+      let%bind pending_mv =
+        match pending_mv with
+        | None -> return pending_mv
+        | Some _ ->
+          (* Moves are two events (move_away, move_into), which we combine into a single
+             Move event. However if we happen to read the first event but not the second
+             one, we'd fail to consolidate them. To make the consolidation more reliable,
+             when we get a move_away event at the end of a batch, and there are more
+             events we can process sufficiently quickly, then we process that second batch
+             and potentially consolidate the moves. If no further events can be processed
+             sufficiently quickly, then we just report the move_away to avoid introducing
+             unbounded latency.
+          *)
+          (match%map
+             match t.wait_to_consolidate_moves with
+             | None -> return `Timeout
+             | Some span ->
+               Clock.with_timeout span (Deferred.both ready_to_write ready_to_read)
+           with
+           | `Timeout ->
+             report_pending_move pending_mv;
+             None
+           | `Result _ -> pending_mv)
+      in
+      let%bind () = ready_to_write in
+      match%bind ready_to_read with
       | `Bad_fd -> failwith "Bad Inotify file descriptor"
-      | `Closed -> return (`Finished ())
+      | `Closed ->
+        report_pending_move pending_mv;
+        return (`Finished ())
       | `Ready ->
         (* Read in the async thread. We should reading memory, like what happens with
            pipes and sockets, and unlike what happens with files, and we should know
            that there's data. Ensure the fd is nonblock so the read raises instead of
            blocking async if something has gone wrong. *)
         (match Fd.with_file_descr ~nonblocking:true t.fd Inotify.read with
-         | `Already_closed -> return (`Finished ())
+         | `Already_closed ->
+           report_pending_move pending_mv;
+           return (`Finished ())
          | `Error exn -> raise_s [%sexp "Inotify.read failed", (exn : Exn.t)]
          | `Ok events ->
+           if false (* for one-off debug *)
+           then
+             print_s [%sexp (List.map events ~f:Inotify.string_of_event : string list)];
            let ev_kinds =
-             List.filter_map events ~f:(fun (watch, ev_kinds, trans_id, fn) ->
+             List.concat_map events ~f:(fun (watch, ev_kinds, trans_id, fn) ->
                (* queue overflow event is always reported on watch -1 *)
                if Inotify.int_of_watch watch = -1
-               then (
-                 let maybe_overflow =
-                   List.filter_map ev_kinds ~f:(fun ev ->
-                     match ev with
-                     | Q_overflow -> Some (ev, trans_id, "<overflow>")
-                     | _ -> None)
-                 in
-                 if List.is_empty maybe_overflow then None else Some maybe_overflow)
+               then
+                 List.filter_map ev_kinds ~f:(fun ev ->
+                   match ev with
+                   | Q_overflow -> Some (ev, trans_id, "<overflow>")
+                   | _ -> None)
                else (
                  match Hashtbl.find t.watch_table watch with
                  | None ->
@@ -172,20 +208,21 @@ let raw_event_pipe t =
                      (String.concat
                         ~sep:", "
                         (List.map ev_kinds ~f:Inotify.string_of_event_kind));
-                   None
+                   []
                  | Some path ->
                    let fn =
                      match fn with
                      | None -> path
                      | Some fn -> path ^/ fn
                    in
-                   Some (List.map ev_kinds ~f:(fun ev -> ev, trans_id, fn))))
-             |> List.concat
+                   List.filter_map ev_kinds ~f:(function
+                     | Isdir -> None (* this is info, not an event *)
+                     | ev -> Some (ev, trans_id, fn))))
            in
            let pending_mv, actions =
              List.fold
                ev_kinds
-               ~init:(None, [])
+               ~init:(pending_mv, [])
                ~f:(fun (pending_mv, actions) (kind, trans_id, fn) ->
                  let add_pending lst =
                    match pending_mv with
@@ -210,15 +247,8 @@ let raw_event_pipe t =
                  | Access | Attrib | Open | Ignored | Isdir | Unmount | Close_nowrite
                    -> None, add_pending actions)
            in
-           let actions =
-             List.rev
-               (match pending_mv with
-                | None -> actions
-                | Some (_, fn) -> Moved (Away fn) :: actions)
-           in
-           List.iter actions ~f:(Pipe.write_without_pushback_if_open w);
-           let%map () = Pipe.pushback w in
-           `Repeat ())))
+           List.iter (List.rev actions) ~f:(Pipe.write_without_pushback_if_open w);
+           return (`Repeat pending_mv))))
 ;;
 
 let event_pipe ~watch_new_dirs ?events t =
@@ -226,25 +256,29 @@ let event_pipe ~watch_new_dirs ?events t =
   then raw_event_pipe t
   else
     Pipe.create_reader ~size_budget ~close_on_exception:false (fun w ->
-      Pipe.iter (raw_event_pipe t) ~f:(function
-        | (Queue_overflow | Unlinked _ | Moved _ | Modified _) as ev ->
-          Pipe.write_if_open w ev
-        | Created path ->
+      Pipe.iter (raw_event_pipe t) ~f:(fun ev ->
+        let%bind () = Pipe.write_if_open w ev in
+        let new_path =
+          match ev with
+          | Moved (Move (_, path) | Into path) | Created path -> Some path
+          | Queue_overflow | Unlinked _ | Moved (Away _) | Modified _ -> None
+        in
+        match new_path with
+        | None -> return ()
+        | Some path ->
           (match%bind Monitor.try_with (fun () -> Unix.stat path) with
            | Error _ -> (* created file has already disappeared *) return ()
            | Ok stat ->
              (match stat.kind with
-              | `File | `Char | `Block | `Link | `Fifo | `Socket ->
-                Pipe.write_if_open w (Created path)
+              | `File | `Char | `Block | `Link | `Fifo | `Socket -> return ()
               | `Directory ->
-                Pipe.write_without_pushback_if_open w (Created path);
                 let%bind additions = add_all ?events t path in
                 List.iter additions ~f:(fun (file, _stat) ->
                   Pipe.write_without_pushback_if_open w (Created file));
                 Pipe.pushback w))))
 ;;
 
-let create_internal ~modify_event_selector =
+let create_internal ~wait_to_consolidate_moves ~modify_event_selector =
   let fd = Inotify.create () in
   let%map () = In_thread.run (fun () -> Core_unix.set_close_on_exec fd) in
   (* fstat an on inotify fd says the filetype is File, but we tell async Fifo instead.
@@ -260,11 +294,12 @@ let create_internal ~modify_event_selector =
   ; modify_event_selector
   ; default_selectors =
       Event.Selector.inotify_selectors Event.Selector.all modify_event_selector
+  ; wait_to_consolidate_moves
   }
 ;;
 
 let create_empty ~modify_event_selector =
-  let%map t = create_internal ~modify_event_selector in
+  let%map t = create_internal ~wait_to_consolidate_moves:None ~modify_event_selector in
   t, event_pipe ~watch_new_dirs:false t
 ;;
 
@@ -273,6 +308,7 @@ let create
       ?(recursive = true)
       ?(watch_new_dirs = true)
       ?(events = Event.Selector.all)
+      ?wait_to_consolidate_moves
       path
   =
   let events =
@@ -280,10 +316,11 @@ let create
     then Event.Selector.Created :: Event.Selector.Moved :: events
     else events
   in
-  let%bind t = create_internal ~modify_event_selector in
+  let%bind t = create_internal ~wait_to_consolidate_moves ~modify_event_selector in
   let skip_dir = if recursive then None else Some (fun _ -> return true) in
   let%map initial_files = add_all ?skip_dir ~events t path in
   t, initial_files, event_pipe ~watch_new_dirs ~events t
 ;;
 
 let stop t = Fd.close t.fd
+let stopped t = Fd.is_closed t.fd
