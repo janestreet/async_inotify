@@ -188,8 +188,7 @@ let raw_event_pipe t =
          | `Error exn -> raise_s [%sexp "Inotify.read failed", (exn : Exn.t)]
          | `Ok events ->
            if false (* for one-off debug *)
-           then
-             print_s [%sexp (List.map events ~f:Inotify.string_of_event : string list)];
+           then print_s [%sexp (List.map events ~f:Inotify.string_of_event : string list)];
            let ev_kinds =
              List.concat_map events ~f:(fun (watch, ev_kinds, trans_id, fn) ->
                (* queue overflow event is always reported on watch -1 *)
@@ -244,8 +243,8 @@ let raw_event_pipe t =
                  | Modify | Close_write -> None, Modified fn :: add_pending actions
                  | Q_overflow -> None, Queue_overflow :: add_pending actions
                  | Delete_self -> None, add_pending actions
-                 | Access | Attrib | Open | Ignored | Isdir | Unmount | Close_nowrite
-                   -> None, add_pending actions)
+                 | Access | Attrib | Open | Ignored | Isdir | Unmount | Close_nowrite ->
+                   None, add_pending actions)
            in
            List.iter (List.rev actions) ~f:(Pipe.write_without_pushback_if_open w);
            return (`Repeat pending_mv))))
