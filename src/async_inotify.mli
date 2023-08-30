@@ -35,7 +35,7 @@ module Event : sig
     | Unlinked of string
     | Modified of string
     | Moved of move
-    (** Queue overflow means that you are not consuming events fast enough and just
+        (** Queue overflow means that you are not consuming events fast enough and just
         lost some of them. This means that some changes to files you want might go
         unnoticed *)
     | Queue_overflow
@@ -46,7 +46,7 @@ end
 
 type modify_event_selector =
   [ `Any_change
-  (** Send a Modified event whenever the contents of the file changes
+    (** Send a Modified event whenever the contents of the file changes
       (which can be very often when writing a large file) *)
   | `Closed_writable_fd
     (** Only send a Modify event when someone with a file descriptor

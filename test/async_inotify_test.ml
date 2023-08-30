@@ -113,8 +113,7 @@ let%expect_test "move nested dirs within the monitored dir" =
           >>= print1
           >>= print1
           >>= fun () ->
-          read1 pipe
-          >>| expect_one_of [ Moved (Away "./dir_a"); Moved (Away "./dir_b") ]
+          read1 pipe >>| expect_one_of [ Moved (Away "./dir_a"); Moved (Away "./dir_b") ]
         in
         let%bind () = rm "dir_b/file_0" >>= print1 in
         let%bind () = touch "dir_b/file_1" >>= print1 in
