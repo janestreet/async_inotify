@@ -1,3 +1,5 @@
-(library (name async_inotify_test)
+(library
+ (name async_inotify_test)
  (libraries async async_inotify core core_unix expect_test_helpers_async)
- (preprocess (pps ppx_jane)))
+ (preprocess
+  (pps ppx_jane)))
