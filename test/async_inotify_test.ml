@@ -97,7 +97,8 @@ let%expect_test "rename monitored dir" =
     in
     [%expect {|
       (Moved (Away dir_a))
-      (Moved (Away dir_a)) |}];
+      (Moved (Away dir_a))
+      |}];
     return ())
 ;;
 
@@ -121,11 +122,12 @@ let%expect_test "move nested dirs within the monitored dir" =
     in
     [%expect
       {|
-   (Moved (Move ./dir_a ./dir_b))
-   (Created ./dir_b/file_0)
-   (one_of ((Moved (Away ./dir_a)) (Moved (Away ./dir_b))))
-   (Unlinked ./dir_b/file_0)
-   (Created ./dir_b/file_1) |}];
+      (Moved (Move ./dir_a ./dir_b))
+      (Created ./dir_b/file_0)
+      (one_of ((Moved (Away ./dir_a)) (Moved (Away ./dir_b))))
+      (Unlinked ./dir_b/file_0)
+      (Created ./dir_b/file_1)
+      |}];
     return ())
 ;;
 
@@ -144,9 +146,10 @@ let%expect_test "move dir into monitored dir" =
     in
     [%expect
       {|
-   (Moved (Into dir_a/dir_b))
-   (Created dir_a/dir_b/file_0)
-   (Unlinked dir_a/dir_b/file_0)
-   (Created dir_a/dir_b/file_1) |}];
+      (Moved (Into dir_a/dir_b))
+      (Created dir_a/dir_b/file_0)
+      (Unlinked dir_a/dir_b/file_0)
+      (Created dir_a/dir_b/file_1)
+      |}];
     return ())
 ;;
