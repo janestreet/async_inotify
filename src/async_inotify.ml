@@ -28,13 +28,13 @@ module Event = struct
     let inotify_selectors ts modify_event_selector =
       List.dedup_and_sort ts ~compare
       |> List.concat_map ~f:(function
-           | Created -> [ Inotify.S_Create ]
-           | Unlinked -> [ S_Delete ]
-           | Modified ->
-             (match modify_event_selector with
-              | `Any_change -> [ S_Modify ]
-              | `Closed_writable_fd -> [ S_Close_write ])
-           | Moved -> [ S_Move_self; S_Moved_from; S_Moved_to ])
+        | Created -> [ Inotify.S_Create ]
+        | Unlinked -> [ S_Delete ]
+        | Modified ->
+          (match modify_event_selector with
+           | `Any_change -> [ S_Modify ]
+           | `Closed_writable_fd -> [ S_Close_write ])
+        | Moved -> [ S_Move_self; S_Moved_from; S_Moved_to ])
     ;;
   end
 
@@ -223,28 +223,28 @@ let raw_event_pipe t =
                ev_kinds
                ~init:(pending_mv, [])
                ~f:(fun (pending_mv, actions) (kind, trans_id, fn) ->
-               let add_pending lst =
-                 match pending_mv with
-                 | None -> lst
-                 | Some (_, fn) -> Moved (Away fn) :: lst
-               in
-               match kind with
-               | Moved_from -> Some (trans_id, fn), add_pending actions
-               | Moved_to ->
-                 (match pending_mv with
-                  | None -> None, Moved (Into fn) :: actions
-                  | Some (m_trans_id, m_fn) ->
-                    if Int32.( = ) m_trans_id trans_id
-                    then None, Moved (Move (m_fn, fn)) :: actions
-                    else None, Moved (Away m_fn) :: Moved (Into fn) :: actions)
-               | Move_self -> Some (trans_id, fn), add_pending actions
-               | Create -> None, Created fn :: add_pending actions
-               | Delete -> None, Unlinked fn :: add_pending actions
-               | Modify | Close_write -> None, Modified fn :: add_pending actions
-               | Q_overflow -> None, Queue_overflow :: add_pending actions
-               | Delete_self -> None, add_pending actions
-               | Access | Attrib | Open | Ignored | Isdir | Unmount | Close_nowrite ->
-                 None, add_pending actions)
+                 let add_pending lst =
+                   match pending_mv with
+                   | None -> lst
+                   | Some (_, fn) -> Moved (Away fn) :: lst
+                 in
+                 match kind with
+                 | Moved_from -> Some (trans_id, fn), add_pending actions
+                 | Moved_to ->
+                   (match pending_mv with
+                    | None -> None, Moved (Into fn) :: actions
+                    | Some (m_trans_id, m_fn) ->
+                      if Int32.( = ) m_trans_id trans_id
+                      then None, Moved (Move (m_fn, fn)) :: actions
+                      else None, Moved (Away m_fn) :: Moved (Into fn) :: actions)
+                 | Move_self -> Some (trans_id, fn), add_pending actions
+                 | Create -> None, Created fn :: add_pending actions
+                 | Delete -> None, Unlinked fn :: add_pending actions
+                 | Modify | Close_write -> None, Modified fn :: add_pending actions
+                 | Q_overflow -> None, Queue_overflow :: add_pending actions
+                 | Delete_self -> None, add_pending actions
+                 | Access | Attrib | Open | Ignored | Isdir | Unmount | Close_nowrite ->
+                   None, add_pending actions)
            in
            List.iter (List.rev actions) ~f:(Pipe.write_without_pushback_if_open w);
            return (`Repeat pending_mv))))
@@ -297,9 +297,14 @@ let create_internal ~wait_to_consolidate_moves ~modify_event_selector =
   }
 ;;
 
-let create_empty ~modify_event_selector =
-  let%map t = create_internal ~wait_to_consolidate_moves:None ~modify_event_selector in
-  t, event_pipe ~watch_new_dirs:false t
+let create_empty
+  ?(watch_new_dirs = false)
+  ?wait_to_consolidate_moves
+  ~modify_event_selector
+  ()
+  =
+  let%map t = create_internal ~wait_to_consolidate_moves ~modify_event_selector in
+  t, event_pipe ~watch_new_dirs t
 ;;
 
 let create

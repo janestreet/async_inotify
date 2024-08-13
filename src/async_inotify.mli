@@ -35,7 +35,7 @@ module Event : sig
     | Unlinked of string
     | Modified of string
     | Moved of move
-        (** Queue overflow means that you are not consuming events fast enough and just
+    (** Queue overflow means that you are not consuming events fast enough and just
         lost some of them. This means that some changes to files you want might go
         unnoticed *)
     | Queue_overflow
@@ -76,9 +76,9 @@ type modify_event_selector =
     likely to get a single [Move (Move _)].
 *)
 val create
-  :  ?modify_event_selector:modify_event_selector
-  -> ?recursive:bool
-  -> ?watch_new_dirs:bool
+  :  ?modify_event_selector:modify_event_selector (** default: [`Any_change] *)
+  -> ?recursive:bool (** default: [true] *)
+  -> ?watch_new_dirs:bool (** default: [true] *)
   -> ?events:Event.Selector.t list (** default: [Event.Selector.all] *)
   -> ?wait_to_consolidate_moves:Time_float.Span.t
   -> string
@@ -89,7 +89,10 @@ val create
 
     It returns the pipe of all events coming from t. *)
 val create_empty
-  :  modify_event_selector:modify_event_selector
+  :  ?watch_new_dirs:bool (** default: [false] *)
+  -> ?wait_to_consolidate_moves:Time_float.Span.t
+  -> modify_event_selector:modify_event_selector
+  -> unit
   -> (t * Event.t Pipe.Reader.t) Deferred.t
 
 (** [stop t] stops watching for notifications. The pipe of events is closed once all

@@ -95,7 +95,8 @@ let%expect_test "rename monitored dir" =
         let%bind () = touch "dir_a/file_0" in
         return ())
     in
-    [%expect {|
+    [%expect
+      {|
       (Moved (Away dir_a))
       (Moved (Away dir_a))
       |}];
