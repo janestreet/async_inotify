@@ -106,13 +106,16 @@ let add ?events t path =
 ;;
 
 (* adds all the directories under path (including path) to t *)
-let add_all ?skip_dir ?events t path =
+let add_all
+  ?(on_open_errors = Async_find.Options.Print)
+  ?(on_stat_errors = Async_find.Options.Print)
+  ?skip_dir
+  ?events
+  t
+  path
+  =
   let options =
-    { Async_find.Options.default with
-      on_open_errors = Print
-    ; on_stat_errors = Print
-    ; skip_dir
-    }
+    { Async_find.Options.default with on_open_errors; on_stat_errors; skip_dir }
   in
   let%bind () = add ?events t path in
   let f = Async_find.create ~options path in
