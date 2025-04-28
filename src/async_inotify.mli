@@ -35,9 +35,8 @@ module Event : sig
     | Unlinked of string
     | Modified of string
     | Moved of move
-    (** Queue overflow means that you are not consuming events fast enough and just
-        lost some of them. This means that some changes to files you want might go
-        unnoticed *)
+    (** Queue overflow means that you are not consuming events fast enough and just lost
+        some of them. This means that some changes to files you want might go unnoticed *)
     | Queue_overflow
   [@@deriving sexp_of, compare, equal]
 
@@ -46,13 +45,12 @@ end
 
 type modify_event_selector =
   [ `Any_change
-    (** Send a Modified event whenever the contents of the file changes
-      (which can be very often when writing a large file) *)
+    (** Send a Modified event whenever the contents of the file changes (which can be very
+        often when writing a large file) *)
   | `Closed_writable_fd
-    (** Only send a Modify event when someone with a file descriptor
-        with write permission to that file is closed. There are
-        usually many fewer of these events (for large files),
-        but they come later. *)
+    (** Only send a Modify event when someone with a file descriptor with write permission
+        to that file is closed. There are usually many fewer of these events (for large
+        files), but they come later. *)
   ]
 
 (** [create path] creates an inotify watching path. Returns
@@ -68,13 +66,12 @@ type modify_event_selector =
     this will always watch for [Created] and [Moved] events, even if not included in
     [events]. Note that the automatic inclusion of [Created] and [Moved] events if
     [watch_new_dirs] is only a property of [create]; subsequent calls to
-    [add t]/[add_all t] will not automatically include these, even if [t] was
-    created with [watch_new_dirs].
+    [add t]/[add_all t] will not automatically include these, even if [t] was created with
+    [watch_new_dirs].
 
     [wait_to_consolidate_moves] specifies whether to wait a little bit after seeing a
     [Move (Away _)] event for the corresponding [Move (Into, _)] event, so you are more
-    likely to get a single [Move (Move _)].
-*)
+    likely to get a single [Move (Move _)]. *)
 val create
   :  ?modify_event_selector:modify_event_selector (** default: [`Any_change] *)
   -> ?recursive:bool (** default: [true] *)
@@ -84,8 +81,8 @@ val create
   -> string
   -> (t * file_info list * Event.t Pipe.Reader.t) Deferred.t
 
-(** [create_empty modify_event_selector] creates an inotify that watches nothing
-    until [add] or [add_all] is called.
+(** [create_empty modify_event_selector] creates an inotify that watches nothing until
+    [add] or [add_all] is called.
 
     It returns the pipe of all events coming from t. *)
 val create_empty
@@ -108,11 +105,13 @@ val add
   -> string
   -> unit Deferred.t
 
-(** [add_all t path] watches [path] and all its current subdirectories recursively.
-    This may generate events in the event pipe that are older than the returned file
-    info, in the presence of concurrent modification to the filesystem.  *)
+(** [add_all t path] watches [path] and all its current subdirectories recursively. This
+    may generate events in the event pipe that are older than the returned file info, in
+    the presence of concurrent modification to the filesystem. *)
 val add_all
-  :  ?skip_dir:(string * Unix.Stats.t -> bool Deferred.t)
+  :  ?on_open_errors:Async_find.Options.error_handler (** Default: [Print] *)
+  -> ?on_stat_errors:Async_find.Options.error_handler (** Default: [Print] *)
+  -> ?skip_dir:(string * Unix.Stats.t -> bool Deferred.t)
   -> ?events:Event.Selector.t list (** default: [Event.Selector.all] *)
   -> t
   -> string
