@@ -125,6 +125,8 @@ let add_all
       let%map () = add ?events t fn in
       (fn, stat) :: files
     | _ -> return ((fn, stat) :: files))
+  >>| List.sort ~compare:(fun (_, stat1) (_, stat2) ->
+    Comparable.lift Time_float.compare ~f:Unix.Stats.mtime stat1 stat2)
 ;;
 
 let remove t path =
