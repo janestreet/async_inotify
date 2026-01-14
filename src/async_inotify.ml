@@ -139,7 +139,7 @@ let remove t path =
     return ()
 ;;
 
-(* with streams, this was effectively infinite, so pick a big number  *)
+(* with streams, this was effectively infinite, so pick a big number *)
 let size_budget = 10_000_000
 
 let raw_event_pipe t =
@@ -183,9 +183,9 @@ let raw_event_pipe t =
         return (`Finished ())
       | `Ready ->
         (* Read in the async thread. We should reading memory, like what happens with
-           pipes and sockets, and unlike what happens with files, and we should know
-           that there's data. Ensure the fd is nonblock so the read raises instead of
-           blocking async if something has gone wrong. *)
+           pipes and sockets, and unlike what happens with files, and we should know that
+           there's data. Ensure the fd is nonblock so the read raises instead of blocking
+           async if something has gone wrong. *)
         (match Fd.with_file_descr ~nonblocking:true t.fd Inotify.read with
          | `Already_closed ->
            report_pending_move pending_mv;
@@ -285,8 +285,8 @@ let event_pipe ~watch_new_dirs ?events t =
 let create_internal ~wait_to_consolidate_moves ~modify_event_selector =
   let fd = Inotify.create () in
   let%map () = In_thread.run (fun () -> Core_unix.set_close_on_exec fd) in
-  (* fstat an on inotify fd says the filetype is File, but we tell async Fifo instead.
-     The reason is that async considers that for File, Fd.ready_to is meaningless and so
+  (* fstat an on inotify fd says the filetype is File, but we tell async Fifo instead. The
+     reason is that async considers that for File, Fd.ready_to is meaningless and so
      should return immediately. So instead we say Fifo, because an inotify fd is basically
      the read end of a pipe whose write end is owned by the kernel, and more importantly,
      Fd.create knows that fifos support nonblocking. *)
