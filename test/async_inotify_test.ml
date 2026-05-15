@@ -19,9 +19,9 @@ let expect_one_of choices event =
 ;;
 
 let mkdir dir = Unix.mkdir ~p:() dir
-let touch file = Process.run_expect_no_output_exn ~prog:"touch" ~args:[ file ] ()
-let rm file = Process.run_expect_no_output_exn ~prog:"rm" ~args:[ "-rf"; file ] ()
-let mv a b = Process.run_expect_no_output_exn ~prog:"mv" ~args:[ a; b ] ()
+let touch file = Process.run_expect_no_stdout_exn ~prog:"touch" ~args:[ file ] ()
+let rm file = Process.run_expect_no_stdout_exn ~prog:"rm" ~args:[ "-rf"; file ] ()
+let mv a b = Process.run_expect_no_stdout_exn ~prog:"mv" ~args:[ a; b ] ()
 
 let with_temp_dir f =
   Expect_test_helpers_async.with_temp_dir (fun dir ->
